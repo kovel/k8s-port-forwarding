@@ -105,8 +105,19 @@ async fn build_ui(
     ns_options.insert(0, "-- select namespace --");
 
     let ns_dropdown = gtk4::DropDown::from_strings(ns_options.as_slice());
+
+    // resources
+    let resource_group = gtk4::CheckButton::new();
+    let pod_radio = gtk4::CheckButton::builder()
+        .group(&resource_group)
+        .build();
     let pod_dropdown = gtk4::DropDown::builder().build();
+    let svc_radio = gtk4::CheckButton::builder()
+        .group(&resource_group)
+        .build();
     let svc_dropdown = gtk4::DropDown::builder().build();
+
+    // ports
     let port_in = gtk4::Text::builder().text("5432").build();
     let port_out = gtk4::Text::builder().text("5432").build();
 
@@ -114,7 +125,7 @@ async fn build_ui(
     port_out.add_css_class("port");
 
     // gtk boxes
-    let svc_n_podx_box = gtk4::Box::builder()
+    let svc_n_pods_box = gtk4::Box::builder()
         .halign(Align::Center)
         .margin_top(10)
         .spacing(5)
@@ -134,9 +145,11 @@ async fn build_ui(
     gtk_box.append(&ns_dropdown);
 
     // pods and services
-    svc_n_podx_box.append(&svc_dropdown);
-    svc_n_podx_box.append(&pod_dropdown);
-    gtk_box.append(&svc_n_podx_box);
+    svc_n_pods_box.append(&svc_radio);
+    svc_n_pods_box.append(&svc_dropdown);
+    svc_n_pods_box.append(&pod_radio);
+    svc_n_pods_box.append(&pod_dropdown);
+    gtk_box.append(&svc_n_pods_box);
 
     // local port
     gtk_box.append(&Label::new(Some("Local port:")));
@@ -229,7 +242,12 @@ async fn build_ui(
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
 
-                if svc_dropdown.selected() > 0 {
+                if svc_radio.is_active() {
+                    if svc_dropdown.selected() < 0 {
+                        tx_clone.send_blocking("nothing selected...".to_string()).unwrap();
+                        return
+                    }
+
                     tx_clone
                         .send_blocking(format!(
                             "selected service: {}",
@@ -284,60 +302,67 @@ async fn build_ui(
                         .push(Arc::new(child));
 
                     return
-                }
-
-                tx_clone
-                    .send_blocking(format!(
-                        "selected pod: {}",
-                        pod_values_clone.lock().unwrap()[(pod_dropdown.selected() - 1) as usize]
-                    ))
-                    .unwrap();
-
-                let child = match SharedChild::spawn(
-                    &mut Command::new("kubectl".to_string())
-                        .arg("-n".to_string())
-                        .arg(ns.to_string())
-                        .arg("port-forward".to_string())
-                        .arg(format!(
-                            "pod/{}",
-                            pod_values_clone.lock().unwrap()[pod_dropdown.selected() as usize]
-                        )) // Replace with your pod name
-                        .arg(format!("{}:{}", port_in.text(), port_out.text())) // Replace with your desired ports
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped()),
-                ) {
-                    Ok(child) => {
-                        let stdout = BufReader::new(child.take_stdout().unwrap());
-                        let stderr = BufReader::new(child.take_stderr().unwrap());
-
-                        let tx_clone = tx.clone();
-                        thread::spawn(move || {
-                            // let mut buffer = log_view_clone.lock().unwrap().buffer();
-                            for line in stdout.lines() {
-                                tx_clone
-                                    .send_blocking(format!("stdout: {:?}", line))
-                                    .unwrap();
-                            }
-                        });
-
-                        let tx_clone = tx.clone();
-                        thread::spawn(move || {
-                            for line in stderr.lines() {
-                                tx_clone
-                                    .send_blocking(format!("stderr: {:?}", line))
-                                    .unwrap();
-                            }
-                        });
-
-                        child
+                } else if pod_radio.is_active() {
+                    if svc_dropdown.selected() < 0 {
+                        tx_clone.send_blocking("nothing selected...".to_string()).unwrap();
+                        return
                     }
-                    _ => panic!("cannot run pid"),
-                };
-                app_model_clone
-                    .running_children
-                    .lock()
-                    .unwrap()
-                    .push(Arc::new(child));
+
+                    tx_clone
+                        .send_blocking(format!(
+                            "selected pod: {}",
+                            pod_values_clone.lock().unwrap()[(pod_dropdown.selected() - 1) as usize]
+                        ))
+                        .unwrap();
+
+                    let child = match SharedChild::spawn(
+                        &mut Command::new("kubectl".to_string())
+                            .arg("-n".to_string())
+                            .arg(ns.to_string())
+                            .arg("port-forward".to_string())
+                            .arg(format!(
+                                "pod/{}",
+                                pod_values_clone.lock().unwrap()[pod_dropdown.selected() as usize]
+                            )) // Replace with your pod name
+                            .arg(format!("{}:{}", port_in.text(), port_out.text())) // Replace with your desired ports
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped()),
+                    ) {
+                        Ok(child) => {
+                            let stdout = BufReader::new(child.take_stdout().unwrap());
+                            let stderr = BufReader::new(child.take_stderr().unwrap());
+
+                            let tx_clone = tx.clone();
+                            thread::spawn(move || {
+                                // let mut buffer = log_view_clone.lock().unwrap().buffer();
+                                for line in stdout.lines() {
+                                    tx_clone
+                                        .send_blocking(format!("stdout: {:?}", line))
+                                        .unwrap();
+                                }
+                            });
+
+                            let tx_clone = tx.clone();
+                            thread::spawn(move || {
+                                for line in stderr.lines() {
+                                    tx_clone
+                                        .send_blocking(format!("stderr: {:?}", line))
+                                        .unwrap();
+                                }
+                            });
+
+                            child
+                        }
+                        _ => panic!("cannot run pid"),
+                    };
+                    app_model_clone
+                        .running_children
+                        .lock()
+                        .unwrap()
+                        .push(Arc::new(child));
+                } else {
+                    tx_clone.send_blocking("nothing selected...".to_string()).unwrap();
+                }
             }
             _ => {
                 println!("nothing happen...");
