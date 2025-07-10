@@ -1,0 +1,15 @@
+[package]
+name = "workflow-mgr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gtk4 = { version = "0.9.7" }
+glib = "0.20.12"
+async-channel = "2.5.0"
+k8s-openapi = { version = "0.25.0", features = ["v1_33"] }
+kube = { version = "1.1.0", features = ["derive", "runtime", "ws", "kube-client"] }
+futures = "0.3.31"
+tokio = { version = "1.46.1", features = ["full"] }
+serde_json = "1.0.140"
+shared_child = "1.1.1"
