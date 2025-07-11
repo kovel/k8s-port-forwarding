@@ -111,11 +111,26 @@ async fn build_ui(
     let pod_radio = gtk4::CheckButton::builder()
         .group(&resource_group)
         .build();
-    let pod_dropdown = gtk4::DropDown::builder().build();
+    let pod_dropdown = gtk4::DropDown::builder()
+        .sensitive(false)
+        .build();
     let svc_radio = gtk4::CheckButton::builder()
         .group(&resource_group)
         .build();
-    let svc_dropdown = gtk4::DropDown::builder().build();
+    let svc_dropdown = gtk4::DropDown::builder()
+        .sensitive(false)
+        .build();
+
+    // sensitivity switching
+    let svc_dropdown_clone = svc_dropdown.clone();
+    svc_radio.connect_toggled(move |r| {
+        svc_dropdown_clone.set_sensitive(r.is_active());
+    });
+    let pod_dropdown_clone = pod_dropdown.clone();
+    pod_radio.connect_toggled(move |r| {
+        pod_dropdown_clone.set_sensitive(r.is_active());
+    });
+
 
     // ports
     let port_in = gtk4::Text::builder().text("5432").build();
