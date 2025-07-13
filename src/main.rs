@@ -246,8 +246,6 @@ impl ApplicationModel {
                 self.svc_values
                     .lock()
                     .unwrap()
-                    .as_slice()
-                    .to_vec()
                     .iter()
                     .map(|v| v.as_str())
                     .collect::<Vec<_>>()
@@ -281,8 +279,6 @@ impl ApplicationModel {
                 self.pod_values
                     .lock()
                     .unwrap()
-                    .as_slice()
-                    .to_vec()
                     .iter()
                     .map(|v| v.as_str())
                     .collect::<Vec<_>>()
