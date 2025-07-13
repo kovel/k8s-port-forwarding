@@ -6,8 +6,9 @@ use futures::executor::block_on;
 use gtk4::gio::ListModel;
 use gtk4::glib::property::PropertyGet;
 use gtk4::prelude::*;
-use gtk4::{Align, DropDown, Label, Orientation, StringList, TextView, gdk};
+use gtk4::{Align, Builder, DropDown, Label, Orientation, StringList, TextView, gdk};
 use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::Client;
 use kube::api::Api;
 use kube::api::ListParams;
@@ -24,19 +25,27 @@ use tokio::select;
 struct ApplicationModel {
     svc_values: Arc<Mutex<Vec<String>>>,
     pod_values: Arc<Mutex<Vec<String>>>,
+    ports_values: Arc<Mutex<Vec<String>>>,
 
     pod_tx: async_channel::Sender<(String)>,
     pod_rx: async_channel::Receiver<(String)>,
 
-    log_view_tx: async_channel::Sender<(String)>,
-    log_view_rx: async_channel::Receiver<(String)>,
-
     svc_tx: async_channel::Sender<(String)>,
     svc_rx: async_channel::Receiver<(String)>,
+
+    svc_ports_tx: async_channel::Sender<(String, u32)>,
+    svc_ports_rx: async_channel::Receiver<(String, u32)>,
+
+    pods_ports_tx: async_channel::Sender<(String, u32)>,
+    pods_ports_rx: async_channel::Receiver<(String, u32)>,
+
+    log_view_tx: async_channel::Sender<(String)>,
+    log_view_rx: async_channel::Receiver<(String)>,
 
     running_children: Arc<Mutex<Vec<Arc<SharedChild>>>>,
     pod_dropdown: Option<Arc<Mutex<DropDown>>>,
     svc_dropdown: Option<Arc<Mutex<DropDown>>>,
+    ports_dropdown: Option<Arc<Mutex<DropDown>>>,
     log_view: Option<Arc<Mutex<TextView>>>,
 }
 
@@ -44,22 +53,30 @@ impl Default for ApplicationModel {
     fn default() -> Self {
         let (pod_tx, pod_rx) = async_channel::unbounded();
         let (svc_tx, svc_rx) = async_channel::unbounded();
+        let (svc_ports_tx, svc_ports_rx) = async_channel::unbounded();
+        let (pods_ports_tx, pods_ports_rx) = async_channel::unbounded();
         let (log_view_tx, log_view_rx) = async_channel::unbounded();
 
         ApplicationModel {
             svc_values: Arc::new(Mutex::new(vec![])),
             pod_values: Arc::new(Mutex::new(vec![])),
+            ports_values: Arc::new(Mutex::new(vec![])),
 
             pod_tx,
             pod_rx,
             svc_tx,
             svc_rx,
+            svc_ports_tx,
+            svc_ports_rx,
+            pods_ports_tx,
+            pods_ports_rx,
             log_view_tx,
             log_view_rx,
 
             running_children: Arc::new(Mutex::new(vec![])),
             pod_dropdown: None,
             svc_dropdown: None,
+            ports_dropdown: None,
             log_view: None,
         }
     }
@@ -85,9 +102,108 @@ impl ApplicationModel {
                     message = self_clone.log_view_rx.recv() => {
                         self_clone.handle_log_message(message.unwrap()).await;
                     }
+                    msg = self_clone.svc_ports_rx.recv() => {
+                        self_clone.handle_svc_port(msg.unwrap()).await;
+                    }
+                    msg = self_clone.pods_ports_rx.recv() => {
+                        self_clone.handle_pod_port(msg.unwrap()).await;
+                    }
                 }
             }
         });
+    }
+
+    async fn handle_svc_port(&mut self, msg: (String, u32)) {
+        let ns_value = msg.0;
+        let svc_name = self.svc_values.lock().unwrap()[msg.1 as usize].clone();
+
+        let client = Client::try_default().await.unwrap();
+        let svc_api: Api<Service> = Api::namespaced(client, ns_value.as_str());
+        self.ports_values.lock().unwrap().clear();
+        svc_api
+            .get(svc_name.as_str())
+            .await
+            .unwrap()
+            .spec
+            .unwrap()
+            .ports
+            .iter()
+            .for_each(|v_port| {
+                v_port
+                    .iter()
+                    .for_each(|port| match port.target_port.clone().unwrap() {
+                        IntOrString::Int(port_i32) => {
+                            self.ports_values
+                                .lock()
+                                .unwrap()
+                                .push(format!("{}", port_i32));
+                        }
+                        IntOrString::String(port_string) => {
+                            self.ports_values.lock().unwrap().push(port_string);
+                        }
+                    })
+            });
+        self.ports_dropdown
+            .clone()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_model(Some(&ListModel::from(StringList::new(
+                self.ports_values
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ))));
+    }
+
+    async fn handle_pod_port(&mut self, msg: (String, u32)) {
+        let ns_value = msg.0;
+        let pod_name = self.pod_values.lock().unwrap()[msg.1 as usize].clone();
+
+        let client = Client::try_default().await.unwrap();
+        let pod_api: Api<Pod> = Api::namespaced(client, ns_value.as_str());
+        self.ports_values.lock().unwrap().clear();
+        pod_api
+            .get(pod_name.as_str())
+            .await
+            .unwrap()
+            .spec
+            .unwrap()
+            .containers
+            .iter()
+            .map(|c| c.ports.clone())
+            .flatten()
+            .for_each(|v_port| {
+                v_port.iter().for_each(|port| match port.host_port.clone() {
+                    None => self
+                        .ports_values
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}", port.container_port)),
+                    Some(_) => self
+                        .ports_values
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}", port.host_port.clone().unwrap())),
+                })
+            });
+        self.ports_dropdown
+            .clone()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_model(Some(&ListModel::from(StringList::new(
+                self.ports_values
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ))));
     }
 
     async fn handle_log_message(&mut self, message: String) {
@@ -274,11 +390,18 @@ async fn build_ui(
     let res_spinner = gtk4::Spinner::builder().tooltip_text("loading...").build();
 
     // ports
-    let port_in = gtk4::Text::builder().text("5432").build();
-    let port_out = gtk4::Text::builder().text("5432").build();
+    let port_in = gtk4::Text::new();
+    let port_out_vbox = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .halign(Align::Center)
+        .margin_top(10)
+        .spacing(5)
+        .build();
+    let port_out = gtk4::DropDown::builder().build();
+    let port_out_tx = gtk4::Text::new();
 
     port_in.add_css_class("port");
-    port_out.add_css_class("port");
+    port_out_tx.add_css_class("port");
 
     // gtk boxes
     let svc_n_pods_box = gtk4::Box::builder()
@@ -310,6 +433,7 @@ async fn build_ui(
 
     app_model.pod_dropdown = Some(Arc::new(Mutex::new(pod_dropdown.clone())));
     app_model.svc_dropdown = Some(Arc::new(Mutex::new(svc_dropdown.clone())));
+    app_model.ports_dropdown = Some(Arc::new(Mutex::new(port_out.clone())));
     app_model.log_view = Some(Arc::new(Mutex::new(log_view.clone())));
 
     // local port
@@ -318,7 +442,11 @@ async fn build_ui(
 
     // k8s port
     gtk_box.append(&Label::new(Some("K8S port:")));
-    gtk_box.append(&port_out);
+    port_out_vbox.append(&gtk4::Label::new(Some("Select port")));
+    port_out_vbox.append(&port_out);
+    port_out_vbox.append(&gtk4::Label::new(Some("or enter")));
+    port_out_vbox.append(&port_out_tx);
+    gtk_box.append(&port_out_vbox);
 
     let ns_values_clone = ns_values.clone().as_array().unwrap().to_vec();
 
@@ -354,6 +482,46 @@ async fn build_ui(
         }
     });
 
+    let app_model_clone = app_model.clone();
+    let ns_values_clone = ns_values.clone().as_array().unwrap().to_vec();
+    let ns_dropdown_clone = ns_dropdown.clone();
+    svc_dropdown.connect_selected_item_notify(move |v| {
+        if ns_dropdown_clone.selected() == 0 || v.selected() == 0 {
+            return;
+        }
+
+        app_model_clone
+            .svc_ports_tx
+            .send_blocking((
+                ns_values_clone[(ns_dropdown_clone.selected() - 1) as usize]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                v.selected(),
+            ))
+            .unwrap();
+    });
+
+    let app_model_clone = app_model.clone();
+    let ns_values_clone = ns_values.clone().as_array().unwrap().to_vec();
+    let ns_dropdown_clone = ns_dropdown.clone();
+    pod_dropdown.connect_selected_item_notify(move |v| {
+        if ns_dropdown_clone.selected() == 0 || v.selected() == 0 {
+            return;
+        }
+
+        app_model_clone
+            .pods_ports_tx
+            .send_blocking((
+                ns_values_clone[(ns_dropdown_clone.selected() - 1) as usize]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                v.selected(),
+            ))
+            .unwrap();
+    });
+
     let ns_values_clone = ns_values.clone();
     let button = gtk4::Button::builder().label("Port forward").build();
     let app_model_clone = app_model.clone();
@@ -372,7 +540,11 @@ async fn build_ui(
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
                 if svc_radio.is_active() {
-                    if svc_dropdown.selected() < 0 {
+                    if svc_dropdown.selected() < 0
+                        || ((app_model_clone.ports_values.lock().unwrap().is_empty()
+                            || port_out.selected() < 0)
+                            && port_out_tx.text().is_empty())
+                    {
                         app_model_clone
                             .log_view_tx
                             .send_blocking("nothing selected...".to_string())
@@ -389,6 +561,12 @@ async fn build_ui(
                         ))
                         .unwrap();
 
+                    let port_out_value = if port_out_tx.text().is_empty() {
+                        &app_model_clone.ports_values.lock().unwrap()[port_out.selected() as usize]
+                    } else {
+                        &port_out_tx.text().to_string()
+                    };
+
                     let child = match SharedChild::spawn(
                         &mut Command::new("kubectl".to_string())
                             .arg("-n".to_string())
@@ -399,7 +577,7 @@ async fn build_ui(
                                 app_model_clone.svc_values.lock().unwrap()
                                     [svc_dropdown.selected() as usize]
                             )) // Replace with your svc name
-                            .arg(format!("{}:{}", port_in.text(), port_out.text())) // Replace with your desired ports
+                            .arg(format!("{}:{}", port_in.text(), port_out_value,))
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
@@ -434,7 +612,11 @@ async fn build_ui(
 
                     return;
                 } else if pod_radio.is_active() {
-                    if svc_dropdown.selected() < 0 {
+                    if svc_dropdown.selected() < 0
+                        || ((app_model_clone.ports_values.lock().unwrap().is_empty()
+                            || port_out.selected() < 0)
+                            && port_out_tx.text().is_empty())
+                    {
                         app_model_clone
                             .log_view_tx
                             .send_blocking("nothing selected...".to_string())
@@ -451,6 +633,12 @@ async fn build_ui(
                         ))
                         .unwrap();
 
+                    let port_out_value = if port_out_tx.text().is_empty() {
+                        &app_model_clone.ports_values.lock().unwrap()[port_out.selected() as usize]
+                    } else {
+                        &port_out_tx.text().to_string()
+                    };
+
                     let child = match SharedChild::spawn(
                         &mut Command::new("kubectl".to_string())
                             .arg("-n".to_string())
@@ -461,7 +649,7 @@ async fn build_ui(
                                 app_model_clone.pod_values.lock().unwrap()
                                     [pod_dropdown.selected() as usize]
                             )) // Replace with your pod name
-                            .arg(format!("{}:{}", port_in.text(), port_out.text())) // Replace with your desired ports
+                            .arg(format!("{}:{}", port_in.text(), port_out_value,)) // Replace with your desired ports
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
