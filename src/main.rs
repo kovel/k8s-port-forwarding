@@ -518,9 +518,12 @@ async fn build_ui(
             .unwrap();
     });
 
-    let ns_values_clone = ns_values.clone();
     let button = gtk4::Button::builder().label("Port forward").build();
+    let disconnect_button = gtk4::Button::builder().label("Disconnect all").build();
+
+    let ns_values_clone = ns_values.clone();
     let app_model_clone = app_model.clone();
+    let disconnect_button_clone = disconnect_button.clone();
     button.connect_clicked(move |_| {
         if ns_dropdown.selected() == 0
             || (svc_dropdown.selected() == 0 && pod_dropdown.selected() == 0)
@@ -606,6 +609,14 @@ async fn build_ui(
                         .unwrap()
                         .push(Arc::new(child));
 
+                    disconnect_button_clone.set_label(
+                        format!(
+                            "Disconnect all ({})",
+                            app_model_clone.running_children.lock().unwrap().len()
+                        )
+                        .as_str(),
+                    );
+
                     return;
                 } else if pod_radio.is_active() {
                     if svc_dropdown.selected() < 0
@@ -677,6 +688,14 @@ async fn build_ui(
                         .lock()
                         .unwrap()
                         .push(Arc::new(child));
+
+                    disconnect_button_clone.set_label(
+                        format!(
+                            "Disconnect all ({})",
+                            app_model_clone.running_children.lock().unwrap().len()
+                        )
+                            .as_str(),
+                    );
                 } else {
                     app_model_clone
                         .log_view_tx
@@ -692,8 +711,7 @@ async fn build_ui(
     gtk_box.append(&button);
 
     let mut app_model_clone = app_model.clone();
-    let disconnect_button = gtk4::Button::builder().label("Disconnect all").build();
-    disconnect_button.connect_clicked(move |_| unsafe {
+    disconnect_button.connect_clicked(move |v| unsafe {
         println!("disconnecting...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
             match x.kill() {
@@ -703,6 +721,8 @@ async fn build_ui(
                         .send_blocking(format!("killed pid #{}", x.id()))
                         .unwrap();
                     println!("killed {}", x.id());
+
+                    v.set_label("Disconnect all");
                 }
                 Err(msg) => {
                     eprintln!("{:?}", msg)
