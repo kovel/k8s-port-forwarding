@@ -1,7 +1,6 @@
 extern crate glib;
 extern crate gtk4;
 
-use async_channel::RecvError;
 use futures::executor::block_on;
 use gtk4::gio::ListModel;
 use gtk4::glib::property::PropertyGet;
@@ -42,7 +41,7 @@ struct ApplicationModel {
     log_view_tx: async_channel::Sender<(String)>,
     log_view_rx: async_channel::Receiver<(String)>,
 
-    running_children: Arc<Mutex<Vec<Arc<SharedChild>>>>,
+    running_children: Arc<Mutex<Vec<Arc<(String, SharedChild)>>>>,
     pod_dropdown: Option<Arc<Mutex<DropDown>>>,
     svc_dropdown: Option<Arc<Mutex<DropDown>>>,
     ports_dropdown: Option<Arc<Mutex<DropDown>>>,
@@ -310,9 +309,9 @@ async fn main() -> glib::ExitCode {
     application.connect_shutdown(move |_| unsafe {
         println!("shutting down...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
-            match x.kill() {
+            match x.1.kill() {
                 Ok(_) => {
-                    println!("killed {}", x.id());
+                    println!("killed {}", x.1.id());
                 }
                 Err(msg) => {
                     eprintln!("{:?}", msg)
@@ -519,11 +518,12 @@ async fn build_ui(
     });
 
     let button = gtk4::Button::builder().label("Port forward").build();
-    let disconnect_button = gtk4::Button::builder().label("Disconnect all").build();
+    let disconnect_all_button = gtk4::Button::builder().label("Disconnect all").build();
+    let disconnect_button = gtk4::Button::builder().label("Disconnect...").build();
 
     let ns_values_clone = ns_values.clone();
     let app_model_clone = app_model.clone();
-    let disconnect_button_clone = disconnect_button.clone();
+    let disconnect_all_button_clone = disconnect_all_button.clone();
     button.connect_clicked(move |_| {
         if ns_dropdown.selected() == 0
             || (svc_dropdown.selected() == 0 && pod_dropdown.selected() == 0)
@@ -607,9 +607,16 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new(child));
+                        .push(Arc::new((
+                            format!(
+                                "service {}",
+                                app_model_clone.svc_values.lock().unwrap()
+                                    [svc_dropdown.selected() as usize]
+                            ),
+                            child,
+                        )));
 
-                    disconnect_button_clone.set_label(
+                    disconnect_all_button_clone.set_label(
                         format!(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
@@ -687,14 +694,21 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new(child));
+                        .push(Arc::new((
+                            format!(
+                                "pod {}",
+                                app_model_clone.pod_values.lock().unwrap()
+                                    [pod_dropdown.selected() as usize]
+                            ),
+                            child,
+                        )));
 
-                    disconnect_button_clone.set_label(
+                    disconnect_all_button_clone.set_label(
                         format!(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
                         )
-                            .as_str(),
+                        .as_str(),
                     );
                 } else {
                     app_model_clone
@@ -711,16 +725,16 @@ async fn build_ui(
     gtk_box.append(&button);
 
     let mut app_model_clone = app_model.clone();
-    disconnect_button.connect_clicked(move |v| unsafe {
+    disconnect_all_button.connect_clicked(move |v| unsafe {
         println!("disconnecting...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
-            match x.kill() {
+            match x.1.kill() {
                 Ok(_) => {
                     app_model_clone
                         .log_view_tx
-                        .send_blocking(format!("killed pid #{}", x.id()))
+                        .send_blocking(format!("killed pid #{}", x.1.id()))
                         .unwrap();
-                    println!("killed {}", x.id());
+                    println!("killed {}/ {}", x.0, x.1.id());
 
                     v.set_label("Disconnect all");
                 }
@@ -731,7 +745,79 @@ async fn build_ui(
         }
         app_model_clone.running_children.lock().unwrap().clear();
     });
-    gtk_box.append(&disconnect_button);
+
+    let menu = gtk4::PopoverMenu::builder().build();
+
+    let disconnect_box = gtk4::Box::builder()
+        .halign(Align::Center)
+        .margin_top(10)
+        .spacing(5)
+        .orientation(Orientation::Horizontal)
+        .build();
+    disconnect_box.append(&disconnect_all_button);
+    disconnect_box.append(&disconnect_button);
+    disconnect_box.append(&menu);
+    gtk_box.append(&disconnect_box);
+
+    let menu_clone = menu.clone();
+    let app_model_clone = app_model.clone();
+    let disconnect_all_button_clone = disconnect_all_button.clone();
+    let log_view_tx = app_model_clone.log_view_tx.clone();
+    disconnect_button.connect_clicked(move |_| {
+        let menu_items = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+
+        let disconnect_all_button_clone = disconnect_all_button_clone.clone();
+        let running_children = app_model_clone.running_children.clone();
+        let children_clone = running_children.clone().lock().unwrap().clone();
+        let iter = children_clone.iter();
+        let log_view_tx = log_view_tx.clone();
+        let app_model_clone = app_model_clone.clone();
+        let menu_clone_v2 = menu_clone.clone();
+        let mut idx = 0;
+        let buttons = iter
+            .map(move |v| {
+                let button = gtk4::Button::with_label(v.0.as_str());
+
+                let disconnect_all_button_clone = disconnect_all_button_clone.clone();
+                let log_view_tx = log_view_tx.clone();
+                let app_model_clone = app_model_clone.clone();
+                let v = Arc::clone(&v);
+                let menu_clone = menu_clone_v2.clone();
+                button.connect_clicked(move |_button| match v.1.kill() {
+                    Ok(_) => {
+                        log_view_tx
+                            .send_blocking(format!("killed pid #{}", v.1.id()))
+                            .unwrap();
+                        println!("killed {}/ {}", v.0, v.1.id());
+
+                        app_model_clone.running_children.lock().unwrap().remove(idx);
+
+                        let len = app_model_clone.running_children.lock().unwrap().len();
+                        if len > 0 {
+                            disconnect_all_button_clone
+                                .set_label(format!("Disconnect all ({})", len).as_str());
+                        } else {
+                            disconnect_all_button_clone.set_label("Disconnect all");
+                        }
+
+                        menu_clone.popdown();
+                    }
+                    Err(msg) => {
+                        eprintln!("{:?}", msg)
+                    }
+                });
+
+                idx += 1;
+                button
+            })
+            .collect::<Vec<gtk4::Button>>();
+
+        for button in buttons {
+            menu_items.append(&button);
+        }
+        menu_clone.set_child(Some(&menu_items));
+        menu_clone.popup();
+    });
 
     // logging child output
     gtk_box.append(&log_view);
