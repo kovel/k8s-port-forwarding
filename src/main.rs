@@ -3,9 +3,7 @@ extern crate gtk4;
 
 use futures::executor::block_on;
 use gtk4::gio::ListModel;
-use gtk4::glib::property::PropertyGet;
 use gtk4::prelude::*;
-use gtk4::{Align, Builder, DropDown, Label, Orientation, StringList, TextView, gdk};
 use k8s_openapi::api::core::v1::{Pod, Service};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::Client;
@@ -26,11 +24,11 @@ struct ApplicationModel {
     pod_values: Arc<Mutex<Vec<String>>>,
     ports_values: Arc<Mutex<Vec<String>>>,
 
-    pod_tx: async_channel::Sender<(String)>,
-    pod_rx: async_channel::Receiver<(String)>,
+    pod_tx: async_channel::Sender<String>,
+    pod_rx: async_channel::Receiver<String>,
 
-    svc_tx: async_channel::Sender<(String)>,
-    svc_rx: async_channel::Receiver<(String)>,
+    svc_tx: async_channel::Sender<String>,
+    svc_rx: async_channel::Receiver<String>,
 
     svc_ports_tx: async_channel::Sender<(String, u32)>,
     svc_ports_rx: async_channel::Receiver<(String, u32)>,
@@ -38,14 +36,14 @@ struct ApplicationModel {
     pods_ports_tx: async_channel::Sender<(String, u32)>,
     pods_ports_rx: async_channel::Receiver<(String, u32)>,
 
-    log_view_tx: async_channel::Sender<(String)>,
-    log_view_rx: async_channel::Receiver<(String)>,
+    log_view_tx: async_channel::Sender<String>,
+    log_view_rx: async_channel::Receiver<String>,
 
     running_children: Arc<Mutex<Vec<Arc<(String, SharedChild)>>>>,
-    pod_dropdown: Option<Arc<Mutex<DropDown>>>,
-    svc_dropdown: Option<Arc<Mutex<DropDown>>>,
-    ports_dropdown: Option<Arc<Mutex<DropDown>>>,
-    log_view: Option<Arc<Mutex<TextView>>>,
+    pod_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
+    svc_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
+    ports_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
+    log_view: Option<Arc<Mutex<gtk4::TextView>>>,
 }
 
 impl Default for ApplicationModel {
@@ -82,9 +80,6 @@ impl Default for ApplicationModel {
 }
 
 impl ApplicationModel {
-    fn notify_services_dropdown(&self) {}
-    fn notify_pod_dropdown(&self) {}
-
     fn handle_channels(&mut self) {
         let mut self_clone = std::mem::take(self);
         glib::MainContext::default().spawn_local(async move {
@@ -147,7 +142,7 @@ impl ApplicationModel {
             .unwrap()
             .lock()
             .unwrap()
-            .set_model(Some(&ListModel::from(StringList::new(
+            .set_model(Some(&ListModel::from(gtk4::StringList::new(
                 self.ports_values
                     .lock()
                     .unwrap()
@@ -194,7 +189,7 @@ impl ApplicationModel {
             .unwrap()
             .lock()
             .unwrap()
-            .set_model(Some(&ListModel::from(StringList::new(
+            .set_model(Some(&ListModel::from(gtk4::StringList::new(
                 self.ports_values
                     .lock()
                     .unwrap()
@@ -241,7 +236,7 @@ impl ApplicationModel {
             .unwrap()
             .lock()
             .unwrap()
-            .set_model(Some(&ListModel::from(StringList::new(
+            .set_model(Some(&ListModel::from(gtk4::StringList::new(
                 self.svc_values
                     .lock()
                     .unwrap()
@@ -274,7 +269,7 @@ impl ApplicationModel {
             .unwrap()
             .lock()
             .unwrap()
-            .set_model(Some(&ListModel::from(StringList::new(
+            .set_model(Some(&ListModel::from(gtk4::StringList::new(
                 self.pod_values
                     .lock()
                     .unwrap()
@@ -288,13 +283,13 @@ impl ApplicationModel {
 
 #[tokio::main]
 async fn main() -> glib::ExitCode {
-    let mut app_model = ApplicationModel::default();
+    let app_model = ApplicationModel::default();
 
     let application = gtk4::Application::builder()
         .application_id("kovel.k8s.helper")
         .build();
 
-    let mut app_model_clone = app_model.clone();
+    let app_model_clone = app_model.clone();
     application.connect_activate(move |app| {
         let future = build_ui(app, app_model_clone.clone());
         match block_on(future) {
@@ -306,7 +301,7 @@ async fn main() -> glib::ExitCode {
     });
 
     let app_model_clone = app_model.clone();
-    application.connect_shutdown(move |_| unsafe {
+    application.connect_shutdown(move |_| {
         println!("shutting down...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
             match x.1.kill() {
@@ -333,7 +328,7 @@ async fn build_ui(
     style_provider.load_from_path(css_path);
 
     gtk4::style_context_add_provider_for_display(
-        &gdk::Display::default().expect("Could not connect to a display."),
+        &gtk4::gdk::Display::default().expect("Could not connect to a display."),
         &style_provider,
         0_u32,
     );
@@ -388,7 +383,7 @@ async fn build_ui(
     let port_in = gtk4::Text::new();
     let port_out_vbox = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
-        .halign(Align::Center)
+        .halign(gtk4::Align::Center)
         .margin_top(10)
         .spacing(5)
         .build();
@@ -400,17 +395,17 @@ async fn build_ui(
 
     // gtk boxes
     let svc_n_pods_box = gtk4::Box::builder()
-        .halign(Align::Center)
+        .halign(gtk4::Align::Center)
         .margin_top(10)
         .spacing(5)
-        .orientation(Orientation::Horizontal)
+        .orientation(gtk4::Orientation::Horizontal)
         .build();
 
     let gtk_box = gtk4::Box::builder()
-        .halign(Align::Center)
+        .halign(gtk4::Align::Center)
         .margin_top(10)
         .spacing(5)
-        .orientation(Orientation::Vertical)
+        .orientation(gtk4::Orientation::Vertical)
         .build();
     // csss
     gtk_box.add_css_class("body");
@@ -432,11 +427,11 @@ async fn build_ui(
     app_model.log_view = Some(Arc::new(Mutex::new(log_view.clone())));
 
     // local port
-    gtk_box.append(&Label::new(Some("Local port:")));
+    gtk_box.append(&gtk4::Label::new(Some("Local port:")));
     gtk_box.append(&port_in);
 
     // k8s port
-    gtk_box.append(&Label::new(Some("K8S port:")));
+    gtk_box.append(&gtk4::Label::new(Some("K8S port:")));
     port_out_vbox.append(&gtk4::Label::new(Some("Select port")));
     port_out_vbox.append(&port_out);
     port_out_vbox.append(&gtk4::Label::new(Some("or enter")));
@@ -445,7 +440,7 @@ async fn build_ui(
 
     let ns_values_clone = ns_values.clone().as_array().unwrap().to_vec();
 
-    let mut app_model_clone = app_model.clone();
+    let app_model_clone = app_model.clone();
     ns_dropdown.connect_selected_item_notify(move |v| {
         if v.selected() == 0 {
             return;
@@ -461,11 +456,11 @@ async fn build_ui(
 
                 app_model_clone
                     .svc_tx
-                    .send_blocking((ns.to_string()))
+                    .send_blocking(ns.to_string())
                     .unwrap();
                 app_model_clone
                     .pod_tx
-                    .send_blocking((ns.to_string()))
+                    .send_blocking(ns.to_string())
                     .unwrap();
             }
             None => {
@@ -539,9 +534,11 @@ async fn build_ui(
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
                 if svc_radio.is_active() {
-                    if svc_dropdown.selected() < 0
+                    if svc_dropdown.selected() as usize
+                        >= app_model_clone.svc_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                            || port_out.selected() < 0)
+                            || (port_out.selected() as usize)
+                                > app_model_clone.ports_values.lock().unwrap().len())
                             && port_out_tx.text().is_empty())
                     {
                         app_model_clone
@@ -627,9 +624,11 @@ async fn build_ui(
 
                     return;
                 } else if pod_radio.is_active() {
-                    if svc_dropdown.selected() < 0
+                    if pod_dropdown.selected() as usize
+                        >= app_model_clone.pod_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                            || port_out.selected() < 0)
+                            || (port_out.selected() as usize)
+                                >= app_model_clone.ports_values.lock().unwrap().len())
                             && port_out_tx.text().is_empty())
                     {
                         app_model_clone
@@ -726,8 +725,8 @@ async fn build_ui(
     });
     gtk_box.append(&button);
 
-    let mut app_model_clone = app_model.clone();
-    disconnect_all_button.connect_clicked(move |v| unsafe {
+    let app_model_clone = app_model.clone();
+    disconnect_all_button.connect_clicked(move |v| {
         println!("disconnecting...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
             match x.1.kill() {
@@ -751,10 +750,10 @@ async fn build_ui(
     let menu = gtk4::PopoverMenu::builder().build();
 
     let disconnect_box = gtk4::Box::builder()
-        .halign(Align::Center)
+        .halign(gtk4::Align::Center)
         .margin_top(10)
         .spacing(5)
-        .orientation(Orientation::Horizontal)
+        .orientation(gtk4::Orientation::Horizontal)
         .build();
     disconnect_box.append(&disconnect_all_button);
     disconnect_box.append(&disconnect_button);
