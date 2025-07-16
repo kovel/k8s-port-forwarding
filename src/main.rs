@@ -610,7 +610,7 @@ async fn build_ui(
                         .push(Arc::new((
                             format!(
                                 "service {}/{}",
-                                ns_values_clone[(ns_dropdown.selected() - 1) as usize],
+                                ns,
                                 app_model_clone.svc_values.lock().unwrap()
                                     [svc_dropdown.selected() as usize]
                             ),
@@ -698,7 +698,7 @@ async fn build_ui(
                         .push(Arc::new((
                             format!(
                                 "pod {}/{}",
-                                ns_values_clone[(ns_dropdown.selected() - 1) as usize],
+                                ns,
                                 app_model_clone.pod_values.lock().unwrap()
                                     [pod_dropdown.selected() as usize]
                             ),
