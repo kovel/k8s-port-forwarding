@@ -644,7 +644,7 @@ async fn build_ui(
                         .send_blocking(format!(
                             "selected pod: {}",
                             app_model_clone.pod_values.lock().unwrap()
-                                [(pod_dropdown.selected() - 1) as usize]
+                                [pod_dropdown.selected() as usize]
                         ))
                         .unwrap();
 
