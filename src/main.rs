@@ -512,13 +512,14 @@ async fn build_ui(
             .unwrap();
     });
 
-    let button = gtk4::Button::builder().label("Port forward").build();
-    let disconnect_all_button = gtk4::Button::builder().label("Disconnect all").build();
-    let disconnect_button = gtk4::Button::builder().label("Disconnect...").build();
+    let button = gtk4::Button::with_label("Port forward");
+    let disconnect_all_button = gtk4::Button::with_label("Disconnect all");
+    let disconnect_button = gtk4::Button::builder().label("Disconnect...").sensitive(false).build();
 
     let ns_values_clone = ns_values.clone();
     let app_model_clone = app_model.clone();
     let disconnect_all_button_clone = disconnect_all_button.clone();
+    let disconnect_button_clone = disconnect_button.clone();
     button.connect_clicked(move |_| {
         if ns_dropdown.selected() == 0
             || (svc_dropdown.selected() == 0 && pod_dropdown.selected() == 0)
@@ -530,7 +531,7 @@ async fn build_ui(
             .log_view_tx
             .send_blocking(format!("k8s port: {}", port_in.text()))
             .unwrap();
-
+        let disconnect_button_clone = disconnect_button_clone.clone();
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
                 if svc_radio.is_active() {
@@ -621,6 +622,7 @@ async fn build_ui(
                         )
                         .as_str(),
                     );
+                    disconnect_button_clone.set_sensitive(true);
 
                     return;
                 } else if pod_radio.is_active() {
@@ -711,6 +713,7 @@ async fn build_ui(
                         )
                         .as_str(),
                     );
+                    disconnect_button_clone.set_sensitive(true);
                 } else {
                     app_model_clone
                         .log_view_tx
@@ -764,10 +767,11 @@ async fn build_ui(
     let app_model_clone = app_model.clone();
     let disconnect_all_button_clone = disconnect_all_button.clone();
     let log_view_tx = app_model_clone.log_view_tx.clone();
-    disconnect_button.connect_clicked(move |_| {
+    disconnect_button.connect_clicked(move |disconnect_button_v| {
         let menu_items = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
         let disconnect_all_button_clone = disconnect_all_button_clone.clone();
+        let disconnect_button_clone = disconnect_button_v.clone();
         let running_children = app_model_clone.running_children.clone();
         let children_clone = running_children.clone().lock().unwrap().clone();
         let iter = children_clone.iter();
@@ -780,6 +784,7 @@ async fn build_ui(
                 let button = gtk4::Button::with_label(v.0.as_str());
 
                 let disconnect_all_button_clone = disconnect_all_button_clone.clone();
+                let disconnect_button_clone = disconnect_button_clone.clone();
                 let log_view_tx = log_view_tx.clone();
                 let app_model_clone = app_model_clone.clone();
                 let v = Arc::clone(&v);
@@ -797,8 +802,10 @@ async fn build_ui(
                         if len > 0 {
                             disconnect_all_button_clone
                                 .set_label(format!("Disconnect all ({})", len).as_str());
+                            disconnect_button_clone.set_sensitive(true);
                         } else {
                             disconnect_all_button_clone.set_label("Disconnect all");
+                            disconnect_button_clone.set_sensitive(false);
                         }
 
                         menu_clone.popdown();

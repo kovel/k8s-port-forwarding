@@ -1,5 +1,5 @@
 [package]
-name = "workflow-mgr"
+name = "k8s-port-forwarding"
 version = "0.1.0"
 edition = "2024"
 
