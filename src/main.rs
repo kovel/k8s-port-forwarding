@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic, Arc, Mutex};
 use std::thread;
 use tokio::select;
 
@@ -40,6 +40,8 @@ struct ApplicationModel {
     log_view_rx: async_channel::Receiver<String>,
 
     running_children: Arc<Mutex<Vec<Arc<(String, SharedChild)>>>>,
+    loading_qty: Option<Arc<atomic::AtomicI8>>,
+    loading_text: Option<Arc<Mutex<gtk4::Label>>>,
     pod_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
     svc_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
     ports_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
@@ -71,6 +73,8 @@ impl Default for ApplicationModel {
             log_view_rx,
 
             running_children: Arc::new(Mutex::new(vec![])),
+            loading_qty: Some(Arc::new(atomic::AtomicI8::new(0))),
+            loading_text: None,
             pod_dropdown: None,
             svc_dropdown: None,
             ports_dropdown: None,
@@ -80,6 +84,16 @@ impl Default for ApplicationModel {
 }
 
 impl ApplicationModel {
+    fn notify_loading(&self) {
+        self.clone().loading_qty.unwrap().fetch_add(1, atomic::Ordering::Relaxed);
+        self.clone().loading_text.unwrap().lock().unwrap().set_visible(true);
+    }
+    fn notify_loading_done(&self) {
+        if self.clone().loading_qty.unwrap().fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
+            self.clone().loading_text.unwrap().lock().unwrap().set_visible(false);
+        }
+    }
+
     fn handle_channels(&mut self) {
         let mut self_clone = std::mem::take(self);
         glib::MainContext::default().spawn_local(async move {
@@ -88,19 +102,23 @@ impl ApplicationModel {
                     ns = self_clone.svc_rx.recv() => {
                         println!("handling services");
                         self_clone.handle_service_message(ns.unwrap()).await;
+                        self_clone.notify_loading_done();
                     }
                     ns = self_clone.pod_rx.recv() => {
                         println!("handling pods");
                         self_clone.handle_pods_message(ns.unwrap()).await;
+                        self_clone.notify_loading_done();
                     }
                     message = self_clone.log_view_rx.recv() => {
                         self_clone.handle_log_message(message.unwrap()).await;
                     }
                     msg = self_clone.svc_ports_rx.recv() => {
                         self_clone.handle_svc_port(msg.unwrap()).await;
+                        self_clone.notify_loading_done();
                     }
                     msg = self_clone.pods_ports_rx.recv() => {
                         self_clone.handle_pod_port(msg.unwrap()).await;
+                        self_clone.notify_loading_done();
                     }
                 }
             }
@@ -377,7 +395,10 @@ async fn build_ui(
     pod_radio.connect_toggled(move |r| {
         pod_dropdown_clone.set_sensitive(r.is_active());
     });
-    let res_spinner = gtk4::Spinner::builder().tooltip_text("loading...").build();
+    let loading_text = gtk4::Label::builder()
+        .label("Loading...")
+        .visible(false)
+        .build();
 
     // ports
     let port_in = gtk4::Text::new();
@@ -411,16 +432,17 @@ async fn build_ui(
     gtk_box.add_css_class("body");
 
     // namespaces
+    gtk_box.append(&loading_text);
     gtk_box.append(&ns_dropdown);
 
     // pods and services
-    svc_n_pods_box.append(&res_spinner);
     svc_n_pods_box.append(&svc_radio);
     svc_n_pods_box.append(&svc_dropdown);
     svc_n_pods_box.append(&pod_radio);
     svc_n_pods_box.append(&pod_dropdown);
     gtk_box.append(&svc_n_pods_box);
 
+    app_model.loading_text = Some(Arc::new(Mutex::new(loading_text.clone())));
     app_model.pod_dropdown = Some(Arc::new(Mutex::new(pod_dropdown.clone())));
     app_model.svc_dropdown = Some(Arc::new(Mutex::new(svc_dropdown.clone())));
     app_model.ports_dropdown = Some(Arc::new(Mutex::new(port_out.clone())));
@@ -452,12 +474,14 @@ async fn build_ui(
             .unwrap();
         match ns_values_clone[(v.selected() - 1) as usize].as_str() {
             Some(ns) => {
-                res_spinner.start();
 
+                app_model_clone.notify_loading();
                 app_model_clone
                     .svc_tx
                     .send_blocking(ns.to_string())
                     .unwrap();
+
+                app_model_clone.notify_loading();
                 app_model_clone
                     .pod_tx
                     .send_blocking(ns.to_string())
@@ -480,6 +504,7 @@ async fn build_ui(
             return;
         }
 
+        app_model_clone.notify_loading();
         app_model_clone
             .svc_ports_tx
             .send_blocking((
@@ -500,6 +525,7 @@ async fn build_ui(
             return;
         }
 
+        app_model_clone.notify_loading();
         app_model_clone
             .pods_ports_tx
             .send_blocking((
@@ -514,7 +540,10 @@ async fn build_ui(
 
     let button = gtk4::Button::with_label("Port forward");
     let disconnect_all_button = gtk4::Button::with_label("Disconnect all");
-    let disconnect_button = gtk4::Button::builder().label("Disconnect...").sensitive(false).build();
+    let disconnect_button = gtk4::Button::builder()
+        .label("Disconnect...")
+        .sensitive(false)
+        .build();
 
     let ns_values_clone = ns_values.clone();
     let app_model_clone = app_model.clone();
