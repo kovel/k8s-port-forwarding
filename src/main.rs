@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{atomic, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic};
 use std::thread;
 use tokio::select;
 
@@ -85,12 +85,31 @@ impl Default for ApplicationModel {
 
 impl ApplicationModel {
     fn notify_loading(&self) {
-        self.clone().loading_qty.unwrap().fetch_add(1, atomic::Ordering::Relaxed);
-        self.clone().loading_text.unwrap().lock().unwrap().set_visible(true);
+        self.clone()
+            .loading_qty
+            .unwrap()
+            .fetch_add(1, atomic::Ordering::Relaxed);
+        self.clone()
+            .loading_text
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_visible(true);
     }
     fn notify_loading_done(&self) {
-        if self.clone().loading_qty.unwrap().fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
-            self.clone().loading_text.unwrap().lock().unwrap().set_visible(false);
+        if self
+            .clone()
+            .loading_qty
+            .unwrap()
+            .fetch_sub(1, atomic::Ordering::Relaxed)
+            == 1
+        {
+            self.clone()
+                .loading_text
+                .unwrap()
+                .lock()
+                .unwrap()
+                .set_visible(false);
         }
     }
 
@@ -243,7 +262,19 @@ impl ApplicationModel {
 
         let client = Client::try_default().await.unwrap();
         let svcs: Api<Service> = Api::namespaced(client, ns.as_str());
-        for svc in svcs.list(&ListParams::default()).await.unwrap() {
+
+        let services = match svcs.list(&ListParams::default()).await {
+            Ok(service_list) => service_list,
+            Err(_) => {
+                let _ = self
+                    .log_view_tx
+                    .send_blocking("cannot load service list".to_string());
+                println!("cannot load services");
+                return;
+            }
+        };
+
+        for svc in services {
             self.svc_values
                 .lock()
                 .unwrap()
@@ -275,8 +306,19 @@ impl ApplicationModel {
             .push("-- select pod --".to_string());
 
         let client = Client::try_default().await.unwrap();
-        let pods: Api<Pod> = Api::namespaced(client, ns.as_str());
-        for p in pods.list(&ListParams::default()).await.unwrap() {
+        let api: Api<Pod> = Api::namespaced(client, ns.as_str());
+        let pods = match api.list(&ListParams::default()).await {
+            Ok(pod_list) => pod_list,
+            Err(_) => {
+                println!("cannot lod pod list");
+                let _ = self
+                    .log_view_tx
+                    .send_blocking("cannot load pod list".to_string());
+                return;
+            }
+        };
+
+        for p in pods {
             self.pod_values
                 .lock()
                 .unwrap()
@@ -474,7 +516,6 @@ async fn build_ui(
             .unwrap();
         match ns_values_clone[(v.selected() - 1) as usize].as_str() {
             Some(ns) => {
-
                 app_model_clone.notify_loading();
                 app_model_clone
                     .svc_tx
