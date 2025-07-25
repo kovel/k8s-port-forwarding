@@ -18,6 +18,21 @@ use std::sync::{Arc, Mutex, atomic};
 use std::thread;
 use tokio::select;
 
+#[derive(Debug)]
+enum ChildKind {
+    Service,
+    Pod,
+}
+
+#[derive(Debug)]
+struct ChildInfo {
+    kind: ChildKind,
+    port_in: u32,
+    port_out: u32,
+    label: String,
+    shared: SharedChild,
+}
+
 #[derive(Clone, Debug)]
 struct ApplicationModel {
     svc_values: Arc<Mutex<Vec<String>>>,
@@ -39,7 +54,7 @@ struct ApplicationModel {
     log_view_tx: async_channel::Sender<String>,
     log_view_rx: async_channel::Receiver<String>,
 
-    running_children: Arc<Mutex<Vec<Arc<(String, SharedChild)>>>>,
+    running_children: Arc<Mutex<Vec<Arc<ChildInfo>>>>,
     loading_qty: Option<Arc<atomic::AtomicI8>>,
     loading_text: Option<Arc<Mutex<gtk4::Label>>>,
     pod_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
@@ -260,7 +275,16 @@ impl ApplicationModel {
             .unwrap()
             .push("-- select service --".to_string());
 
-        let client = Client::try_default().await.unwrap();
+        let client = match Client::try_default().await {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = self
+                    .log_view_tx
+                    .send_blocking("cannot access client".to_string());
+                println!("cannot access client");
+                return;
+            }
+        };
         let svcs: Api<Service> = Api::namespaced(client, ns.as_str());
 
         let services = match svcs.list(&ListParams::default()).await {
@@ -305,7 +329,16 @@ impl ApplicationModel {
             .unwrap()
             .push("-- select pod --".to_string());
 
-        let client = Client::try_default().await.unwrap();
+        let client = match Client::try_default().await {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = self
+                    .log_view_tx
+                    .send_blocking("cannot access client".to_string());
+                println!("cannot access client");
+                return;
+            }
+        };
         let api: Api<Pod> = Api::namespaced(client, ns.as_str());
         let pods = match api.list(&ListParams::default()).await {
             Ok(pod_list) => pod_list,
@@ -364,9 +397,9 @@ async fn main() -> glib::ExitCode {
     application.connect_shutdown(move |_| {
         println!("shutting down...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
-            match x.1.kill() {
+            match x.shared.kill() {
                 Ok(_) => {
-                    println!("killed {}", x.1.id());
+                    println!("killed {}", x.shared.id());
                 }
                 Err(msg) => {
                     eprintln!("{:?}", msg)
@@ -608,9 +641,9 @@ async fn build_ui(
                     if svc_dropdown.selected() as usize
                         >= app_model_clone.svc_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                            || (port_out.selected() as usize)
-                                > app_model_clone.ports_values.lock().unwrap().len())
-                            && port_out_tx.text().is_empty())
+                        || (port_out.selected() as usize)
+                        > app_model_clone.ports_values.lock().unwrap().len())
+                        && port_out_tx.text().is_empty())
                     {
                         app_model_clone
                             .log_view_tx
@@ -644,7 +677,7 @@ async fn build_ui(
                                 app_model_clone.svc_values.lock().unwrap()
                                     [svc_dropdown.selected() as usize]
                             )) // Replace with your svc name
-                            .arg(format!("{}:{}", port_in.text(), port_out_value,))
+                            .arg(format!("{}:{}", port_in.text(), port_out_value, ))
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
@@ -675,22 +708,25 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new((
-                            format!(
+                        .push(Arc::new(ChildInfo {
+                            kind: ChildKind::Service,
+                            port_in: port_in.text().parse().unwrap(),
+                            port_out: port_out_value.parse().unwrap(),
+                            label: format!(
                                 "service {}/{}",
                                 ns,
                                 app_model_clone.svc_values.lock().unwrap()
                                     [svc_dropdown.selected() as usize]
                             ),
-                            child,
-                        )));
+                            shared: child,
+                        }));
 
                     disconnect_all_button_clone.set_label(
                         format!(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
                         )
-                        .as_str(),
+                            .as_str(),
                     );
                     disconnect_button_clone.set_sensitive(true);
 
@@ -699,9 +735,9 @@ async fn build_ui(
                     if pod_dropdown.selected() as usize
                         >= app_model_clone.pod_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                            || (port_out.selected() as usize)
-                                >= app_model_clone.ports_values.lock().unwrap().len())
-                            && port_out_tx.text().is_empty())
+                        || (port_out.selected() as usize)
+                        >= app_model_clone.ports_values.lock().unwrap().len())
+                        && port_out_tx.text().is_empty())
                     {
                         app_model_clone
                             .log_view_tx
@@ -735,7 +771,7 @@ async fn build_ui(
                                 app_model_clone.pod_values.lock().unwrap()
                                     [pod_dropdown.selected() as usize]
                             )) // Replace with your pod name
-                            .arg(format!("{}:{}", port_in.text(), port_out_value,)) // Replace with your desired ports
+                            .arg(format!("{}:{}", port_in.text(), port_out_value, )) // Replace with your desired ports
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
@@ -766,22 +802,25 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new((
-                            format!(
+                        .push(Arc::new(ChildInfo {
+                            kind: ChildKind::Pod,
+                            port_in: port_in.text().parse().unwrap(),
+                            port_out: port_out_value.parse().unwrap(),
+                            label: format!(
                                 "pod {}/{}",
                                 ns,
                                 app_model_clone.pod_values.lock().unwrap()
-                                    [pod_dropdown.selected() as usize]
+                                    [svc_dropdown.selected() as usize]
                             ),
-                            child,
-                        )));
+                            shared: child,
+                        }));
 
                     disconnect_all_button_clone.set_label(
                         format!(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
                         )
-                        .as_str(),
+                            .as_str(),
                     );
                     disconnect_button_clone.set_sensitive(true);
                 } else {
@@ -802,13 +841,13 @@ async fn build_ui(
     disconnect_all_button.connect_clicked(move |v| {
         println!("disconnecting...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
-            match x.1.kill() {
+            match x.shared.kill() {
                 Ok(_) => {
                     app_model_clone
                         .log_view_tx
-                        .send_blocking(format!("killed pid #{}", x.1.id()))
+                        .send_blocking(format!("killed pid #{}", x.shared.id()))
                         .unwrap();
-                    println!("killed {}/ {}", x.0, x.1.id());
+                    println!("killed {}/ {}", x.label, x.shared.id());
 
                     v.set_label("Disconnect all");
                 }
@@ -851,7 +890,7 @@ async fn build_ui(
         let mut idx = 0;
         let buttons = iter
             .map(move |v| {
-                let button = gtk4::Button::with_label(v.0.as_str());
+                let button = gtk4::Button::with_label(v.label.as_str());
 
                 let disconnect_all_button_clone = disconnect_all_button_clone.clone();
                 let disconnect_button_clone = disconnect_button_clone.clone();
@@ -859,12 +898,12 @@ async fn build_ui(
                 let app_model_clone = app_model_clone.clone();
                 let v = Arc::clone(&v);
                 let menu_clone = menu_clone_v2.clone();
-                button.connect_clicked(move |_button| match v.1.kill() {
+                button.connect_clicked(move |_button| match v.shared.kill() {
                     Ok(_) => {
                         log_view_tx
-                            .send_blocking(format!("killed pid #{}", v.1.id()))
+                            .send_blocking(format!("killed pid #{}", v.shared.id()))
                             .unwrap();
-                        println!("killed {}/ {}", v.0, v.1.id());
+                        println!("killed {}/ {}", v.label, v.shared.id());
 
                         app_model_clone.running_children.lock().unwrap().remove(idx);
 
