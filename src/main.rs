@@ -838,6 +838,7 @@ async fn build_ui(
     gtk_box.append(&button);
 
     let app_model_clone = app_model.clone();
+    let disconnect_button_clone = disconnect_button.clone();
     disconnect_all_button.connect_clicked(move |v| {
         println!("disconnecting...");
         for x in app_model_clone.running_children.lock().unwrap().iter() {
@@ -857,6 +858,8 @@ async fn build_ui(
             }
         }
         app_model_clone.running_children.lock().unwrap().clear();
+
+        disconnect_button_clone.set_sensitive(false);
     });
 
     let menu = gtk4::PopoverMenu::builder().build();
