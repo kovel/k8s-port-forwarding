@@ -1139,6 +1139,7 @@ dependencies = [
  "gtk4",
  "k8s-openapi",
  "kube",
+ "serde",
  "serde_json",
  "shared_child",
  "tokio",

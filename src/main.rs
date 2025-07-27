@@ -9,10 +9,11 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::Client;
 use kube::api::Api;
 use kube::api::ListParams;
+use serde::{Deserialize, Serialize};
 use shared_child::SharedChild;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, atomic};
 use std::thread;
@@ -24,13 +25,45 @@ enum ChildKind {
     Pod,
 }
 
+impl ChildKind {
+    fn to_string(&self) -> String {
+        match self {
+            ChildKind::Service => "service".to_string(),
+            ChildKind::Pod => "pod".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ChildInfo {
+    ns: String,
     kind: ChildKind,
+    resource: String,
     port_in: u32,
     port_out: u32,
     label: String,
     shared: SharedChild,
+}
+
+impl ChildInfo {
+    fn to_json(&self) -> ChildInfoJson {
+        ChildInfoJson {
+            ns: self.ns.clone(),
+            kind: self.kind.to_string(),
+            resource: self.resource.clone(),
+            port_in: self.port_in,
+            port_out: self.port_out,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChildInfoJson {
+    ns: String,
+    kind: String,
+    resource: String,
+    port_in: u32,
+    port_out: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +132,20 @@ impl Default for ApplicationModel {
 }
 
 impl ApplicationModel {
+    fn save_children(&self, path: PathBuf) {
+        let mut for_json =
+            Vec::<ChildInfoJson>::with_capacity(self.running_children.lock().unwrap().len());
+        self.running_children
+            .lock()
+            .unwrap()
+            .iter()
+            .for_each(|child| for_json.push(child.to_json()));
+
+        let data = serde_json::to_string_pretty(for_json.as_slice()).unwrap();
+        let mut f = File::create(path).unwrap();
+        f.write(data.as_str().as_bytes()).unwrap();
+    }
+
     fn notify_loading(&self) {
         self.clone()
             .loading_qty
@@ -383,6 +430,59 @@ async fn main() -> glib::ExitCode {
         .build();
 
     let app_model_clone = app_model.clone();
+    application.connect_startup(move |app| {
+        let app_model_clone = app_model_clone.clone();
+        let save = gtk4::gio::ActionEntry::builder("save")
+            .activate(move |_, _, _| {
+                let dialog = gtk4::FileChooserDialog::builder().build();
+
+                dialog.add_button("Save", gtk4::ResponseType::Ok);
+                dialog.set_action(gtk4::FileChooserAction::Save);
+
+                let app_model_clone = app_model_clone.clone();
+                dialog.connect_response(move |d, response| {
+                    if response == gtk4::ResponseType::Ok {
+                        if let Some(file) = d.file() {
+                            if let Some(path) = file.path() {
+                                app_model_clone.save_children(path);
+                            }
+                        }
+                    }
+                    d.close();
+                });
+
+                dialog.show();
+            })
+            .build();
+
+        let quit = gtk4::gio::ActionEntry::builder("quit")
+            .activate(|app: &gtk4::Application, _, _| app.quit())
+            .build();
+
+        app.add_action_entries([save, quit]);
+
+        let menubar = {
+            let file_menu = {
+                let about_menu_item =
+                    gtk4::gio::MenuItem::new(Some("Save mappings..."), Some("app.save"));
+                let quit_menu_item = gtk4::gio::MenuItem::new(Some("Quit"), Some("app.quit"));
+
+                let file_menu = gtk4::gio::Menu::new();
+                file_menu.append_item(&about_menu_item);
+                file_menu.append_item(&quit_menu_item);
+                file_menu
+            };
+
+            let menubar = gtk4::gio::Menu::new();
+            menubar.append_submenu(Some("File"), &file_menu);
+
+            menubar
+        };
+
+        app.set_menubar(Some(&menubar));
+    });
+
+    let app_model_clone = app_model.clone();
     application.connect_activate(move |app| {
         let future = build_ui(app, app_model_clone.clone());
         match block_on(future) {
@@ -432,6 +532,7 @@ async fn build_ui(
         .application(application)
         .title("k8s port forwarding")
         .resizable(false)
+        .show_menubar(true)
         .build();
     window.add_css_class("body");
 
@@ -641,9 +742,9 @@ async fn build_ui(
                     if svc_dropdown.selected() as usize
                         >= app_model_clone.svc_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                        || (port_out.selected() as usize)
-                        > app_model_clone.ports_values.lock().unwrap().len())
-                        && port_out_tx.text().is_empty())
+                            || (port_out.selected() as usize)
+                                > app_model_clone.ports_values.lock().unwrap().len())
+                            && port_out_tx.text().is_empty())
                     {
                         app_model_clone
                             .log_view_tx
@@ -677,7 +778,7 @@ async fn build_ui(
                                 app_model_clone.svc_values.lock().unwrap()
                                     [svc_dropdown.selected() as usize]
                             )) // Replace with your svc name
-                            .arg(format!("{}:{}", port_in.text(), port_out_value, ))
+                            .arg(format!("{}:{}", port_in.text(), port_out_value,))
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
@@ -704,20 +805,21 @@ async fn build_ui(
                         }
                         _ => panic!("cannot run pid"),
                     };
+
+                    let svc_name = app_model_clone.svc_values.lock().unwrap()
+                        [svc_dropdown.selected() as usize]
+                        .clone();
                     app_model_clone
                         .running_children
                         .lock()
                         .unwrap()
                         .push(Arc::new(ChildInfo {
+                            ns: ns.to_string(),
                             kind: ChildKind::Service,
+                            resource: svc_name.clone(),
                             port_in: port_in.text().parse().unwrap(),
                             port_out: port_out_value.parse().unwrap(),
-                            label: format!(
-                                "service {}/{}",
-                                ns,
-                                app_model_clone.svc_values.lock().unwrap()
-                                    [svc_dropdown.selected() as usize]
-                            ),
+                            label: format!("service {}/{}", ns, svc_name.clone(),),
                             shared: child,
                         }));
 
@@ -726,7 +828,7 @@ async fn build_ui(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
                         )
-                            .as_str(),
+                        .as_str(),
                     );
                     disconnect_button_clone.set_sensitive(true);
 
@@ -735,9 +837,9 @@ async fn build_ui(
                     if pod_dropdown.selected() as usize
                         >= app_model_clone.pod_values.lock().unwrap().len()
                         || ((app_model_clone.ports_values.lock().unwrap().is_empty()
-                        || (port_out.selected() as usize)
-                        >= app_model_clone.ports_values.lock().unwrap().len())
-                        && port_out_tx.text().is_empty())
+                            || (port_out.selected() as usize)
+                                >= app_model_clone.ports_values.lock().unwrap().len())
+                            && port_out_tx.text().is_empty())
                     {
                         app_model_clone
                             .log_view_tx
@@ -771,7 +873,7 @@ async fn build_ui(
                                 app_model_clone.pod_values.lock().unwrap()
                                     [pod_dropdown.selected() as usize]
                             )) // Replace with your pod name
-                            .arg(format!("{}:{}", port_in.text(), port_out_value, )) // Replace with your desired ports
+                            .arg(format!("{}:{}", port_in.text(), port_out_value,)) // Replace with your desired ports
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped()),
                     ) {
@@ -798,20 +900,21 @@ async fn build_ui(
                         }
                         _ => panic!("cannot run pid"),
                     };
+
+                    let pod_name = app_model_clone.pod_values.lock().unwrap()
+                        [pod_dropdown.selected() as usize]
+                        .clone();
                     app_model_clone
                         .running_children
                         .lock()
                         .unwrap()
                         .push(Arc::new(ChildInfo {
+                            ns: ns.to_string(),
                             kind: ChildKind::Pod,
+                            resource: pod_name.clone(),
                             port_in: port_in.text().parse().unwrap(),
                             port_out: port_out_value.parse().unwrap(),
-                            label: format!(
-                                "pod {}/{}",
-                                ns,
-                                app_model_clone.pod_values.lock().unwrap()
-                                    [svc_dropdown.selected() as usize]
-                            ),
+                            label: format!("pod {}/{}", ns, pod_name.clone()),
                             shared: child,
                         }));
 
@@ -820,7 +923,7 @@ async fn build_ui(
                             "Disconnect all ({})",
                             app_model_clone.running_children.lock().unwrap().len()
                         )
-                            .as_str(),
+                        .as_str(),
                     );
                     disconnect_button_clone.set_sensitive(true);
                 } else {
