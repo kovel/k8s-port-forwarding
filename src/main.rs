@@ -1,6 +1,7 @@
 extern crate glib;
 extern crate gtk4;
 
+use std::collections::HashSet;
 use futures::executor::block_on;
 use gtk4::gio::ListModel;
 use gtk4::prelude::*;
@@ -88,6 +89,7 @@ struct ApplicationModel {
     log_view_rx: async_channel::Receiver<String>,
 
     running_children: Arc<Mutex<Vec<Arc<ChildInfo>>>>,
+    busy_ports: Arc<Mutex<HashSet<u32>>>,
     loading_qty: Option<Arc<atomic::AtomicI8>>,
     loading_text: Option<Arc<Mutex<gtk4::Label>>>,
     pod_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
@@ -121,6 +123,7 @@ impl Default for ApplicationModel {
             log_view_rx,
 
             running_children: Arc::new(Mutex::new(vec![])),
+            busy_ports: Arc::new(Mutex::new(HashSet::new())),
             loading_qty: Some(Arc::new(atomic::AtomicI8::new(0))),
             loading_text: None,
             pod_dropdown: None,
@@ -507,6 +510,7 @@ async fn main() -> glib::ExitCode {
             }
         }
         app_model_clone.running_children.lock().unwrap().clear();
+        app_model_clone.busy_ports.lock().unwrap().clear();
     });
 
     application.run()
@@ -738,6 +742,15 @@ async fn build_ui(
         let disconnect_button_clone = disconnect_button_clone.clone();
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
+                if app_model_clone.busy_ports.lock().unwrap().contains(&port_in.text().parse().unwrap()) {
+                    let d = gtk4::MessageDialog::builder()
+                        .text(format!("Port is busy: {}", port_in.text()))
+                        .build();
+                    d.show();
+
+                    return;
+                }
+
                 if svc_radio.is_active() {
                     if svc_dropdown.selected() as usize
                         >= app_model_clone.svc_values.lock().unwrap().len()
@@ -822,6 +835,7 @@ async fn build_ui(
                             label: format!("service {}/{}", ns, svc_name.clone(),),
                             shared: child,
                         }));
+                    app_model_clone.busy_ports.lock().unwrap().insert(port_in.text().parse().unwrap());
 
                     disconnect_all_button_clone.set_label(
                         format!(
@@ -917,6 +931,7 @@ async fn build_ui(
                             label: format!("pod {}/{}", ns, pod_name.clone()),
                             shared: child,
                         }));
+                    app_model_clone.busy_ports.lock().unwrap().insert(port_in.text().parse().unwrap());
 
                     disconnect_all_button_clone.set_label(
                         format!(
@@ -960,6 +975,7 @@ async fn build_ui(
                 }
             }
         }
+        app_model_clone.busy_ports.lock().unwrap().clear();
         app_model_clone.running_children.lock().unwrap().clear();
 
         disconnect_button_clone.set_sensitive(false);
@@ -1011,6 +1027,7 @@ async fn build_ui(
                             .unwrap();
                         println!("killed {}/ {}", v.label, v.shared.id());
 
+                        app_model_clone.busy_ports.lock().unwrap().remove(&app_model_clone.running_children.lock().unwrap()[idx].port_in);
                         app_model_clone.running_children.lock().unwrap().remove(idx);
 
                         let len = app_model_clone.running_children.lock().unwrap().len();
