@@ -1,7 +1,6 @@
 extern crate glib;
 extern crate gtk4;
 
-use std::collections::HashSet;
 use futures::executor::block_on;
 use gtk4::gio::ListModel;
 use gtk4::prelude::*;
@@ -12,6 +11,7 @@ use kube::api::Api;
 use kube::api::ListParams;
 use serde::{Deserialize, Serialize};
 use shared_child::SharedChild;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,30 +36,21 @@ impl ChildKind {
 }
 
 #[derive(Debug)]
-struct ChildInfo {
-    ns: String,
+struct ChildWrapper {
     kind: ChildKind,
-    resource: String,
-    port_in: u32,
-    port_out: u32,
     label: String,
     shared: SharedChild,
+    info: ChildInfo,
 }
 
-impl ChildInfo {
-    fn to_json(&self) -> ChildInfoJson {
-        ChildInfoJson {
-            ns: self.ns.clone(),
-            kind: self.kind.to_string(),
-            resource: self.resource.clone(),
-            port_in: self.port_in,
-            port_out: self.port_out,
-        }
+impl ChildWrapper {
+    fn get_info(&self) -> ChildInfo {
+        self.info.clone()
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct ChildInfoJson {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChildInfo {
     ns: String,
     kind: String,
     resource: String,
@@ -88,7 +79,7 @@ struct ApplicationModel {
     log_view_tx: async_channel::Sender<String>,
     log_view_rx: async_channel::Receiver<String>,
 
-    running_children: Arc<Mutex<Vec<Arc<ChildInfo>>>>,
+    running_children: Arc<Mutex<Vec<Arc<ChildWrapper>>>>,
     busy_ports: Arc<Mutex<HashSet<u32>>>,
     loading_qty: Option<Arc<atomic::AtomicI8>>,
     loading_text: Option<Arc<Mutex<gtk4::Label>>>,
@@ -137,12 +128,12 @@ impl Default for ApplicationModel {
 impl ApplicationModel {
     fn save_children(&self, path: PathBuf) {
         let mut for_json =
-            Vec::<ChildInfoJson>::with_capacity(self.running_children.lock().unwrap().len());
+            Vec::<ChildInfo>::with_capacity(self.running_children.lock().unwrap().len());
         self.running_children
             .lock()
             .unwrap()
             .iter()
-            .for_each(|child| for_json.push(child.to_json()));
+            .for_each(|child| for_json.push(child.get_info()));
 
         let data = serde_json::to_string_pretty(for_json.as_slice()).unwrap();
         let mut f = File::create(path).unwrap();
@@ -742,7 +733,12 @@ async fn build_ui(
         let disconnect_button_clone = disconnect_button_clone.clone();
         match ns_values_clone[(ns_dropdown.selected() - 1) as usize].as_str() {
             Some(ns) => {
-                if app_model_clone.busy_ports.lock().unwrap().contains(&port_in.text().parse().unwrap()) {
+                if app_model_clone
+                    .busy_ports
+                    .lock()
+                    .unwrap()
+                    .contains(&port_in.text().parse().unwrap())
+                {
                     let d = gtk4::MessageDialog::builder()
                         .text(format!("Port is busy: {}", port_in.text()))
                         .build();
@@ -826,16 +822,23 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new(ChildInfo {
-                            ns: ns.to_string(),
+                        .push(Arc::new(ChildWrapper {
                             kind: ChildKind::Service,
-                            resource: svc_name.clone(),
-                            port_in: port_in.text().parse().unwrap(),
-                            port_out: port_out_value.parse().unwrap(),
                             label: format!("service {}/{}", ns, svc_name.clone(),),
                             shared: child,
+                            info: ChildInfo {
+                                kind: ChildKind::Service.to_string(),
+                                ns: ns.to_string(),
+                                resource: svc_name.clone(),
+                                port_in: port_in.text().parse().unwrap(),
+                                port_out: port_out_value.parse().unwrap(),
+                            },
                         }));
-                    app_model_clone.busy_ports.lock().unwrap().insert(port_in.text().parse().unwrap());
+                    app_model_clone
+                        .busy_ports
+                        .lock()
+                        .unwrap()
+                        .insert(port_in.text().parse().unwrap());
 
                     disconnect_all_button_clone.set_label(
                         format!(
@@ -922,16 +925,23 @@ async fn build_ui(
                         .running_children
                         .lock()
                         .unwrap()
-                        .push(Arc::new(ChildInfo {
-                            ns: ns.to_string(),
+                        .push(Arc::new(ChildWrapper {
                             kind: ChildKind::Pod,
-                            resource: pod_name.clone(),
-                            port_in: port_in.text().parse().unwrap(),
-                            port_out: port_out_value.parse().unwrap(),
                             label: format!("pod {}/{}", ns, pod_name.clone()),
                             shared: child,
+                            info: ChildInfo {
+                                ns: ns.to_string(),
+                                resource: pod_name.clone(),
+                                kind: ChildKind::Pod.to_string(),
+                                port_in: port_in.text().parse().unwrap(),
+                                port_out: port_out_value.parse().unwrap(),
+                            },
                         }));
-                    app_model_clone.busy_ports.lock().unwrap().insert(port_in.text().parse().unwrap());
+                    app_model_clone
+                        .busy_ports
+                        .lock()
+                        .unwrap()
+                        .insert(port_in.text().parse().unwrap());
 
                     disconnect_all_button_clone.set_label(
                         format!(
@@ -1027,7 +1037,11 @@ async fn build_ui(
                             .unwrap();
                         println!("killed {}/ {}", v.label, v.shared.id());
 
-                        app_model_clone.busy_ports.lock().unwrap().remove(&app_model_clone.running_children.lock().unwrap()[idx].port_in);
+                        app_model_clone
+                            .busy_ports
+                            .lock()
+                            .unwrap()
+                            .remove(&app_model_clone.running_children.lock().unwrap()[idx].info.port_in);
                         app_model_clone.running_children.lock().unwrap().remove(idx);
 
                         let len = app_model_clone.running_children.lock().unwrap().len();
