@@ -86,6 +86,8 @@ struct ApplicationModel {
     pod_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
     svc_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
     ports_dropdown: Option<Arc<Mutex<gtk4::DropDown>>>,
+    disconnect_all_button: Option<Arc<Mutex<gtk4::Button>>>,
+    disconnect_button: Option<Arc<Mutex<gtk4::Button>>>,
     log_view: Option<Arc<Mutex<gtk4::TextView>>>,
 }
 
@@ -120,6 +122,8 @@ impl Default for ApplicationModel {
             pod_dropdown: None,
             svc_dropdown: None,
             ports_dropdown: None,
+            disconnect_all_button: None,
+            disconnect_button: None,
             log_view: None,
         }
     }
@@ -138,6 +142,84 @@ impl ApplicationModel {
         let data = serde_json::to_string_pretty(for_json.as_slice()).unwrap();
         let mut f = File::create(path).unwrap();
         f.write(data.as_str().as_bytes()).unwrap();
+    }
+
+    fn fork_child(&self, child_info: ChildInfo) {
+        let child_settings = child_info.clone();
+        let child = match SharedChild::spawn(
+            &mut Command::new("kubectl".to_string())
+                .arg("-n".to_string())
+                .arg(child_settings.ns)
+                .arg("port-forward".to_string())
+                .arg(format!(
+                    "{}/{}",
+                    child_settings.kind, child_settings.resource,
+                ))
+                .arg(format!(
+                    "{}:{}",
+                    child_settings.port_in, child_settings.port_out,
+                ))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        ) {
+            Ok(child) => {
+                let stdout = BufReader::new(child.take_stdout().unwrap());
+                let stderr = BufReader::new(child.take_stderr().unwrap());
+
+                let value = self.log_view_tx.clone();
+                thread::spawn(move || {
+                    // let mut buffer = log_view_clone.lock().unwrap().buffer();
+                    for line in stdout.lines() {
+                        value.send_blocking(format!("stdout: {:?}", line)).unwrap();
+                    }
+                });
+
+                let value = self.log_view_tx.clone();
+                thread::spawn(move || {
+                    for line in stderr.lines() {
+                        value.send_blocking(format!("stderr: {:?}", line)).unwrap();
+                    }
+                });
+
+                child
+            }
+            _ => panic!("cannot run pid"),
+        };
+
+        let child_info_settings = child_info.clone();
+        self.running_children
+            .lock()
+            .unwrap()
+            .push(Arc::new(ChildWrapper {
+                kind: ChildKind::Pod,
+                label: format!(
+                    "pod {}/{}",
+                    child_info_settings.kind, child_info_settings.resource
+                ),
+                shared: child,
+                info: child_info_settings,
+            }));
+        let child_info = child_info.clone();
+        self.busy_ports.lock().unwrap().insert(child_info.port_in);
+
+        self.disconnect_all_button.clone().unwrap().lock().unwrap().set_label(
+            format!(
+                "Disconnect all ({})",
+                self.running_children.lock().unwrap().len()
+            )
+            .as_str(),
+        );
+        self.disconnect_button.clone().unwrap().lock().unwrap().set_sensitive(true);
+    }
+    fn load_children(&self, path: PathBuf) {
+        let mut s = String::new();
+        let mut f = File::open(path).unwrap();
+        f.read_to_string(&mut s).unwrap();
+
+        let mut json = Vec::<ChildInfo>::with_capacity(self.running_children.lock().unwrap().len());
+        json = serde_json::from_str(&s).unwrap();
+
+        json.iter().for_each(|child| self.fork_child(child.clone()));
     }
 
     fn notify_loading(&self) {
@@ -424,59 +506,6 @@ async fn main() -> glib::ExitCode {
         .build();
 
     let app_model_clone = app_model.clone();
-    application.connect_startup(move |app| {
-        let app_model_clone = app_model_clone.clone();
-        let save = gtk4::gio::ActionEntry::builder("save")
-            .activate(move |_, _, _| {
-                let dialog = gtk4::FileChooserDialog::builder().build();
-
-                dialog.add_button("Save", gtk4::ResponseType::Ok);
-                dialog.set_action(gtk4::FileChooserAction::Save);
-
-                let app_model_clone = app_model_clone.clone();
-                dialog.connect_response(move |d, response| {
-                    if response == gtk4::ResponseType::Ok {
-                        if let Some(file) = d.file() {
-                            if let Some(path) = file.path() {
-                                app_model_clone.save_children(path);
-                            }
-                        }
-                    }
-                    d.close();
-                });
-
-                dialog.show();
-            })
-            .build();
-
-        let quit = gtk4::gio::ActionEntry::builder("quit")
-            .activate(|app: &gtk4::Application, _, _| app.quit())
-            .build();
-
-        app.add_action_entries([save, quit]);
-
-        let menubar = {
-            let file_menu = {
-                let about_menu_item =
-                    gtk4::gio::MenuItem::new(Some("Save mappings..."), Some("app.save"));
-                let quit_menu_item = gtk4::gio::MenuItem::new(Some("Quit"), Some("app.quit"));
-
-                let file_menu = gtk4::gio::Menu::new();
-                file_menu.append_item(&about_menu_item);
-                file_menu.append_item(&quit_menu_item);
-                file_menu
-            };
-
-            let menubar = gtk4::gio::Menu::new();
-            menubar.append_submenu(Some("File"), &file_menu);
-
-            menubar
-        };
-
-        app.set_menubar(Some(&menubar));
-    });
-
-    let app_model_clone = app_model.clone();
     application.connect_activate(move |app| {
         let future = build_ui(app, app_model_clone.clone());
         match block_on(future) {
@@ -520,6 +549,93 @@ async fn build_ui(
         &style_provider,
         0_u32,
     );
+
+    let button = gtk4::Button::with_label("Port forward");
+    let disconnect_all_button = gtk4::Button::with_label("Disconnect all");
+    let disconnect_button = gtk4::Button::builder()
+        .label("Disconnect...")
+        .sensitive(false)
+        .build();
+
+    app_model.disconnect_all_button = Some(Arc::new(Mutex::new(disconnect_all_button.clone())));
+    app_model.disconnect_button = Some(Arc::new(Mutex::new(disconnect_button.clone())));
+
+    let app_model_clone_save = app_model.clone();
+    let save = gtk4::gio::ActionEntry::builder("save")
+        .activate(move |_, _, _| {
+            let dialog = gtk4::FileChooserDialog::builder().build();
+
+            dialog.add_button("Save", gtk4::ResponseType::Ok);
+            dialog.set_action(gtk4::FileChooserAction::Save);
+
+            let app_model_clone_save = app_model_clone_save.clone();
+            dialog.connect_response(move |d, response| {
+                if response == gtk4::ResponseType::Ok {
+                    if let Some(file) = d.file() {
+                        if let Some(path) = file.path() {
+                            app_model_clone_save.save_children(path);
+                        }
+                    }
+                }
+                d.close();
+            });
+
+            dialog.show();
+        })
+        .build();
+
+    let app_model_clone_load = app_model.clone();
+    let load = gtk4::gio::ActionEntry::builder("load")
+        .activate(move |_, _, _| {
+            let dialog = gtk4::FileChooserDialog::builder().build();
+
+            dialog.add_button("Load", gtk4::ResponseType::Ok);
+            dialog.set_action(gtk4::FileChooserAction::Open);
+
+            let app_model_clone_load = app_model_clone_load.clone();
+            dialog.connect_response(move |d, response| {
+                if response == gtk4::ResponseType::Ok {
+                    if let Some(file) = d.file() {
+                        if let Some(path) = file.path() {
+                            app_model_clone_load.load_children(path);
+                        }
+                    }
+                }
+                d.close();
+            });
+
+            dialog.show();
+        })
+        .build();
+
+    let quit = gtk4::gio::ActionEntry::builder("quit")
+        .activate(|app: &gtk4::Application, _, _| app.quit())
+        .build();
+
+    application.add_action_entries([save, load, quit]);
+
+    let menubar = {
+        let file_menu = {
+            let save_menu_item =
+                gtk4::gio::MenuItem::new(Some("Save mappings..."), Some("app.save"));
+            let load_menu_item =
+                gtk4::gio::MenuItem::new(Some("Load mappings..."), Some("app.load"));
+            let quit_menu_item = gtk4::gio::MenuItem::new(Some("Quit"), Some("app.quit"));
+
+            let file_menu = gtk4::gio::Menu::new();
+            file_menu.append_item(&save_menu_item);
+            file_menu.append_item(&load_menu_item);
+            file_menu.append_item(&quit_menu_item);
+            file_menu
+        };
+
+        let menubar = gtk4::gio::Menu::new();
+        menubar.append_submenu(Some("File"), &file_menu);
+
+        menubar
+    };
+
+    application.set_menubar(Some(&menubar));
 
     let window = gtk4::ApplicationWindow::builder()
         .default_width(800)
@@ -707,13 +823,6 @@ async fn build_ui(
             ))
             .unwrap();
     });
-
-    let button = gtk4::Button::with_label("Port forward");
-    let disconnect_all_button = gtk4::Button::with_label("Disconnect all");
-    let disconnect_button = gtk4::Button::builder()
-        .label("Disconnect...")
-        .sensitive(false)
-        .build();
 
     let ns_values_clone = ns_values.clone();
     let app_model_clone = app_model.clone();
@@ -976,7 +1085,7 @@ async fn build_ui(
                         .log_view_tx
                         .send_blocking(format!("killed pid #{}", x.shared.id()))
                         .unwrap();
-                    println!("killed {}/ {}", x.label, x.shared.id());
+                    println!("killed {}/{}", x.label, x.shared.id());
 
                     v.set_label("Disconnect all");
                 }
@@ -1035,13 +1144,13 @@ async fn build_ui(
                         log_view_tx
                             .send_blocking(format!("killed pid #{}", v.shared.id()))
                             .unwrap();
-                        println!("killed {}/ {}", v.label, v.shared.id());
+                        println!("killed {}/{}", v.label, v.shared.id());
 
-                        app_model_clone
-                            .busy_ports
-                            .lock()
-                            .unwrap()
-                            .remove(&app_model_clone.running_children.lock().unwrap()[idx].info.port_in);
+                        app_model_clone.busy_ports.lock().unwrap().remove(
+                            &app_model_clone.running_children.lock().unwrap()[idx]
+                                .info
+                                .port_in,
+                        );
                         app_model_clone.running_children.lock().unwrap().remove(idx);
 
                         let len = app_model_clone.running_children.lock().unwrap().len();
