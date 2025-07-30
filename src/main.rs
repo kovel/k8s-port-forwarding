@@ -202,14 +202,24 @@ impl ApplicationModel {
         let child_info = child_info.clone();
         self.busy_ports.lock().unwrap().insert(child_info.port_in);
 
-        self.disconnect_all_button.clone().unwrap().lock().unwrap().set_label(
-            format!(
-                "Disconnect all ({})",
-                self.running_children.lock().unwrap().len()
-            )
-            .as_str(),
-        );
-        self.disconnect_button.clone().unwrap().lock().unwrap().set_sensitive(true);
+        self.disconnect_all_button
+            .clone()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_label(
+                format!(
+                    "Disconnect all ({})",
+                    self.running_children.lock().unwrap().len()
+                )
+                .as_str(),
+            );
+        self.disconnect_button
+            .clone()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_sensitive(true);
     }
     fn load_children(&self, path: PathBuf) {
         let mut s = String::new();
