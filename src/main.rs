@@ -515,6 +515,18 @@ async fn main() -> glib::ExitCode {
         .application_id("kovel.k8s.helper")
         .build();
 
+    application.connect_startup(|_| {
+        let style_provider = gtk4::CssProvider::new();
+        let css_path = Path::new("etc/style.css");
+        style_provider.load_from_path(css_path);
+
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::gdk::Display::default().expect("Could not connect to a display."),
+            &style_provider,
+            0_u32,
+        );
+    });
+
     let app_model_clone = app_model.clone();
     application.connect_activate(move |app| {
         let future = build_ui(app, app_model_clone.clone());
@@ -550,16 +562,6 @@ async fn build_ui(
     application: &gtk4::Application,
     mut app_model: ApplicationModel,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style_provider = gtk4::CssProvider::new();
-    let css_path = Path::new("etc/style.css");
-    style_provider.load_from_path(css_path);
-
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().expect("Could not connect to a display."),
-        &style_provider,
-        0_u32,
-    );
-
     let button = gtk4::Button::with_label("Port forward");
     let disconnect_all_button = gtk4::Button::with_label("Disconnect all");
     let disconnect_button = gtk4::Button::builder()
@@ -725,7 +727,7 @@ async fn build_ui(
         .spacing(5)
         .orientation(gtk4::Orientation::Vertical)
         .build();
-    // csss
+    // css
     gtk_box.add_css_class("body");
 
     // namespaces
