@@ -888,7 +888,7 @@ async fn build_ui(
                         .send_blocking(format!(
                             "selected service: {}",
                             app_model_clone.svc_values.lock().unwrap()
-                                [(svc_dropdown.selected() - 1) as usize]
+                                [svc_dropdown.selected() as usize]
                         ))
                         .unwrap();
 
